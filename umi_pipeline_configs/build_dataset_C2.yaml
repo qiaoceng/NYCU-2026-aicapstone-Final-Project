@@ -19,7 +19,7 @@
     max_lost_frames: 60
     slam_process_mode: create_map
     slam_settings_file: "packages/umi/defaults/orb_slam3_settings/gopro13_fisheye_ratio_4-3_2-7k.yaml"
-    resolution: [2028,2704]
+    resolution: [2028, 2704]
     mask_pts_json_path: "packages/umi/src/umi/asset/mask_4k.json"
 
 03_batch_slam:
@@ -31,20 +31,20 @@
     max_lost_frames: 60
     slam_process_mode: batch_slam
     slam_settings_file: "packages/umi/defaults/orb_slam3_settings/gopro13_fisheye_ratio_4-3_2-7k.yaml"
-    resolution: [2028,2704]
+    resolution: [2028, 2704]
 
 04_detect_aruco:
   instance: "umi.services.aruco_detection.ArucoDetectionService"
   inherit_config: true
   config:
-    camera_intrinsics_path: "packages/umi/defaults/calibration/gopro13_intrinsics_2_7k_C2.json"
+    camera_intrinsics_path: "packages/umi/defaults/calibration/gopro13_intrinsics_2_7k.json"
     aruco_config_path: "packages/umi/defaults/calibration/aruco_config.yaml"
 
 05_run_calibrations:
   instance: "umi.services.calibration.CalibrationService"
   inherit_config: true
   config:
-    resolution: [2028,2704]
+    resolution: [2028, 2704]
     tag_id: 13
     dist_to_center_threshold: 0.6
     nominal_z: 0.01
@@ -59,9 +59,9 @@
   instance: "umi.services.frame_to_pose.FrameToPoseService"
   inherit_config: true
   config:
-    task: "living_room"
+    task: "kitchen"
     marker_size_m: 0.018
-    intrinsics_path: "defaults/calibration/gopro13_intrinsics_2_7k_C2.json"
+    intrinsics_path: "defaults/calibration/gopro13_intrinsics_2_7k.json"
     dataset_plan_filename: dataset_plan.pkl
 
 08_generate_replay_buffer:

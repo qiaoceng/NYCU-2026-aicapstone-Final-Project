@@ -65,9 +65,7 @@ Pass the chosen directory as `--session-dir` to the pipeline runner, e.g. `--ses
 Before kicking off the full reconstruction, run the verification pipeline. It executes stages 00 → 05 plus a new `05b_verify_calibration` quality gate, and stops there:
 
 ```
-uv run umi run-slam-pipeline \
-    umi_pipeline_configs/verify_pipeline.yaml \
-    --session-dir <NAME_OF_YOUR_DIR>/
+uv run umi run-slam-pipeline umi_pipeline_configs/verify_pipeline_C6.yaml --session-dir {raw_videos_dir_path}
 ```
 
 The `env -u VIRTUAL_ENV -u PYTHONPATH` prefix shields the `uv` environment from polluted shell variables (lerobot venv pointer, ROS Humble Python paths). Drop it once your shell init no longer sets those.
@@ -124,9 +122,7 @@ If you trust your recording but the count threshold is too strict, lower `min_va
 Once the verification pipeline exits 0, run the dataset-building pipeline:
 
 ```
-uv run umi run-slam-pipeline \
-    umi_pipeline_configs/build_dataset.yaml \
-    --session-dir <NAME_OF_YOUR_DIR>/
+uv run umi run-slam-pipeline umi_pipeline_configs/build_dataset.yaml --session-dir {raw_videos_dir_path}
 ```
 
 This executes the same stages 00–05 plus `06_generate_dataset_plan`, `07_frame_to_pose`, `08_generate_replay_buffer`, ending with a `dataset.zarr.zip` ready for training. Because stages 00–05 already ran during verification, the existing artifacts on disk will be reused (the SLAM mapping stage skips when `map_atlas.osa` is already present unless `force: true` is set).
