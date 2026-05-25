@@ -42,6 +42,10 @@ class CupStackingSceneCfg(SingleArmFrankaTaskSceneCfg):
             usd_path=str(KITCHEN_OBJECTS_ROOT / "BlueCup" / "BlueCup.usd"),
             mass_props=MassPropertiesCfg(mass=0.1),
         ),
+        init_state=RigidObjectCfg.InitialStateCfg(
+            pos=(0.46, -0.5, OBJECT_Z),
+            rot=(1.0, 0.0, 0.0, 0.0),
+        ),
     )
 
     pink_cup: RigidObjectCfg = RigidObjectCfg(
@@ -49,6 +53,10 @@ class CupStackingSceneCfg(SingleArmFrankaTaskSceneCfg):
         spawn=sim_utils.UsdFileCfg(
             usd_path=str(KITCHEN_OBJECTS_ROOT / "PinkCup" / "PinkCup.usd"),
             mass_props=MassPropertiesCfg(mass=0.1),
+        ),
+        init_state=RigidObjectCfg.InitialStateCfg(
+            pos=(0.26, -0.5, OBJECT_Z),
+            rot=(1.0, 0.0, 0.0, 0.0),
         ),
     )
 

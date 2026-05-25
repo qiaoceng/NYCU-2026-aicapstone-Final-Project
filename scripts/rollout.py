@@ -492,6 +492,49 @@ def main():
     print("[rollout] resetting environment...", flush=True)
     obs_dict, _ = env.reset()
     print("[rollout] env.reset() returned", flush=True)
+    
+    # Print initial cup and table information
+    print("\n[Initial Setup] Cup positions and table information:")
+    try:
+        blue_cup = env.scene["blue_cup"]
+        pink_cup = env.scene["pink_cup"]
+        
+        # CORRECT: Get world position and subtract environment origin (like success condition does)
+        env_origin = env.scene.env_origins[0].cpu().numpy()
+        blue_init_pos_w = blue_cup.data.root_pos_w[0].cpu().numpy()
+        pink_init_pos_w = pink_cup.data.root_pos_w[0].cpu().numpy()
+        
+        # Convert to relative coordinates (subtract env origin)
+        blue_init_pos = blue_init_pos_w - env_origin
+        pink_init_pos = pink_init_pos_w - env_origin
+        
+        print(f"  Environment origin: x={env_origin[0]:.4f}, y={env_origin[1]:.4f}, z={env_origin[2]:.4f}")
+        print(f"\n  Blue cup initial (world):  x={blue_init_pos_w[0]:.4f}, y={blue_init_pos_w[1]:.4f}, z={blue_init_pos_w[2]:.4f}")
+        print(f"  Pink cup initial (world):  x={pink_init_pos_w[0]:.4f}, y={pink_init_pos_w[1]:.4f}, z={pink_init_pos_w[2]:.4f}")
+        print(f"\n  Blue cup initial (relative): x={blue_init_pos[0]:.4f}, y={blue_init_pos[1]:.4f}, z={blue_init_pos[2]:.4f}")
+        print(f"  Pink cup initial (relative): x={pink_init_pos[0]:.4f}, y={pink_init_pos[1]:.4f}, z={pink_init_pos[2]:.4f}")
+        
+        # Calculate table center from cup positions (both cups are on the table)
+        table_center_x = (blue_init_pos[0] + pink_init_pos[0]) / 2.0
+        table_center_y = (blue_init_pos[1] + pink_init_pos[1]) / 2.0
+        table_center_z = blue_init_pos[2]  # Table surface height (same as cup Z when placed on table)
+        
+        print(f"\n  [CALCULATED] Table center: x={table_center_x:.4f}, y={table_center_y:.4f}, z={table_center_z:.4f}")
+        
+        # Estimate table bounds from cup positions (assuming cups are within table bounds)
+        # With cups at (0.36, -0.4) and (0.46, -0.4), and some margin
+        print(f"\n  [ESTIMATED] Table bounds:")
+        print(f"    X range: 0.0 to 0.8 (center ~0.4)")
+        print(f"    Y range: -0.8 to 0.0 (center ~-0.4)")
+        print(f"    Z: 0.0 (table surface)")
+        
+        print(f"\n  [ESTIMATED] Table corners:")
+        print(f"    Corner 1: (0.0, 0.0, 0.0)   - front-right")
+        print(f"    Corner 2: (0.8, 0.0, 0.0)   - front-left")
+        print(f"    Corner 3: (0.8, -0.8, 0.0)  - back-left")
+        print(f"    Corner 4: (0.0, -0.8, 0.0)  - back-right")
+    except Exception as e:
+        print(f"  Could not read cup positions: {e}")
 
     language_instruction = args_cli.policy_language_instruction
     if language_instruction is None:
@@ -520,6 +563,26 @@ def main():
 
     setup_dual_viewports()
 
+    def print_cup_and_table_info(env, episode_num):
+        """Debug function to print cup positions and table bounds."""
+        try:
+            blue_cup = env.scene["blue_cup"]
+            pink_cup = env.scene["pink_cup"]
+            
+            # CORRECT: Get world position and subtract environment origin
+            env_origin = env.scene.env_origins[0].cpu().numpy()
+            blue_pos_w = blue_cup.data.root_pos_w[0].cpu().numpy()
+            pink_pos_w = pink_cup.data.root_pos_w[0].cpu().numpy()
+            
+            # Convert to relative coordinates (same as success condition function)
+            blue_pos = blue_pos_w - env_origin
+            pink_pos = pink_pos_w - env_origin
+            
+            print(f"\n[Episode {episode_num}] Cup positions (relative to env):")
+            print(f"  Blue cup:  x={blue_pos[0]:.4f}, y={blue_pos[1]:.4f}, z={blue_pos[2]:.4f}")
+            print(f"  Pink cup:  x={pink_pos[0]:.4f}, y={pink_pos[1]:.4f}, z={pink_pos[2]:.4f}")
+        except Exception as e:
+            print(f"[Episode {episode_num}] Could not read cup positions: {e}")
 
     success_count, episode_count = 0, 1
     while max_episode_count <= 0 or episode_count <= max_episode_count:
@@ -530,6 +593,7 @@ def main():
                 if controller.reset_state:
                     controller.reset()
                     obs_dict, _ = env.reset()
+                    print_cup_and_table_info(env, episode_count)
                     policy.reset()
                     episode_count += 1
                     break
@@ -555,12 +619,34 @@ def main():
                         rate_limiter.sleep(env)
             if success:
                 print(f"[Evaluation] Episode {episode_count} is successful!")
+                try:
+                    blue_cup = env.scene["blue_cup"]
+                    pink_cup = env.scene["pink_cup"]
+                    env_origin = env.scene.env_origins[0].cpu().numpy()
+                    blue_pos = (blue_cup.data.root_pos_w[0].cpu().numpy() - env_origin)
+                    pink_pos = (pink_cup.data.root_pos_w[0].cpu().numpy() - env_origin)
+                    print(f"  Final cup positions (relative to env):")
+                    print(f"    Blue cup:  x={blue_pos[0]:.4f}, y={blue_pos[1]:.4f}, z={blue_pos[2]:.4f}")
+                    print(f"    Pink cup:  x={pink_pos[0]:.4f}, y={pink_pos[1]:.4f}, z={pink_pos[2]:.4f}")
+                except Exception as e:
+                    print(f"  Could not read final positions: {e}")
                 episode_count += 1
                 success_count += 1
                 policy.reset()
                 break
             if time_out:
                 print(f"[Evaluation] Episode {episode_count} timed out!")
+                try:
+                    blue_cup = env.scene["blue_cup"]
+                    pink_cup = env.scene["pink_cup"]
+                    env_origin = env.scene.env_origins[0].cpu().numpy()
+                    blue_pos = (blue_cup.data.root_pos_w[0].cpu().numpy() - env_origin)
+                    pink_pos = (pink_cup.data.root_pos_w[0].cpu().numpy() - env_origin)
+                    print(f"  Final cup positions (relative to env) - timeout:")
+                    print(f"    Blue cup:  x={blue_pos[0]:.4f}, y={blue_pos[1]:.4f}, z={blue_pos[2]:.4f}")
+                    print(f"    Pink cup:  x={pink_pos[0]:.4f}, y={pink_pos[1]:.4f}, z={pink_pos[2]:.4f}")
+                except Exception as e:
+                    print(f"  Could not read final positions: {e}")
                 episode_count += 1
                 policy.reset()
                 break
