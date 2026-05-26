@@ -49,6 +49,9 @@ _GRIPPER_DOWN_YAW_OFFSET_RANGE = (-0.15, 0.15)
 
 _SUCCESS_X_RANGE = (-0.05, 0.05)
 _SUCCESS_Y_RANGE = (-0.05, 0.05)
+# Minimum height the blue cup must sit above the pink cup to count as stacked.
+# Mirrors ``height_threshold`` in cup_stacking_env_cfg.py's success term.
+_SUCCESS_Z_MIN = 0.10
 
 _FRANKA_REST_JOINT_POS = {
     "panda_joint1": 0.0,
@@ -186,6 +189,8 @@ class CupStackingStateMachine(StateMachineBase):
         done = torch.logical_and(done, blue_cup_pos[:, 0] > pink_cup_pos[:, 0] + _SUCCESS_X_RANGE[0])
         done = torch.logical_and(done, blue_cup_pos[:, 1] < pink_cup_pos[:, 1] + _SUCCESS_Y_RANGE[1])
         done = torch.logical_and(done, blue_cup_pos[:, 1] > pink_cup_pos[:, 1] + _SUCCESS_Y_RANGE[0])
+        done = torch.logical_and(done, blue_cup_pos[:, 2] > pink_cup_pos[:, 2])
+        done = torch.logical_and(done, blue_cup_pos[:, 2] < pink_cup_pos[:, 2] + _SUCCESS_Z_MIN*1.5)
         return bool(done.all().item())
 
     def pre_step(self, env) -> None:
