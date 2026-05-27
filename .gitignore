@@ -35,6 +35,7 @@ dependencies/IsaacLab/**/*.egg-info/
 
 datasets/*
 outputs/*
+rollout_videos/*
 
 # Private external task files
 private_tasks/*

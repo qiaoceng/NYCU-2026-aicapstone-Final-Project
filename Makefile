@@ -2,7 +2,7 @@
 	submodules submodules-pull \
 	build-isaaclab launch-isaaclab \
 	launch-isaaclab-glowsai-4090 launch-isaaclab-glowsai-l40s \
-	launch-isaaclab-vnc \
+	launch-isaaclab-vnc launch-isaaclab-livestream \
 	check-isaaclab-gpu
 
 # ---- Config ------------------------------------------------------------------
@@ -209,6 +209,43 @@ launch-isaaclab-vnc: build-isaaclab
 			echo "== GPU check =="; nvidia-smi || true; \
 			echo "== Vulkan ICD candidates =="; \
 			ls -l /usr/share/vulkan/icd.d /etc/vulkan/icd.d 2>/dev/null || true; \
+			$(select_vulkan_icd); \
+			$(require_runtime_libs); \
+			cd /workspace/aicapstone; \
+			exec /bin/bash \
+		'
+
+# ---- Launch: headless WebRTC livestream (no X / no VNC) ---------------------
+# Renders on the GPU with no X server and streams H.264 to a remote machine.
+# With --net=host the streaming ports are already on the host:
+#   TCP 8011 (signaling/API), TCP+UDP 49100 (WebRTC), UDP 47998-48020 (media).
+# Pick a free GPU with e.g. `make launch-isaaclab-livestream GPU=0`.
+# Inside the container, run your script with `--livestream 2` (implies headless),
+# then connect from your laptop with the Isaac Sim WebRTC Streaming Client.
+launch-isaaclab-livestream: build-isaaclab
+	@set -e; \
+	docker run --rm -it \
+		--name $(CONTAINER_NAME)-livestream \
+		--gpus '"device=$(GPU)"' \
+		--net=host \
+		--ipc=host \
+		--ulimit memlock=-1 \
+		--ulimit stack=67108864 \
+		--shm-size=16g \
+		-v $(shell pwd):/workspace/aicapstone \
+		-v /workspace/aicapstone/.venv \
+		-v /usr/share/vulkan/icd.d:/usr/share/vulkan/icd.d:ro \
+		-v /etc/vulkan/icd.d:/etc/vulkan/icd.d:ro \
+		-e OMNI_KIT_ACCEPT_EULA=Y \
+		-e PRIVACY_CONSENT=Y \
+		-e NVIDIA_VISIBLE_DEVICES=$(GPU) \
+		-e NVIDIA_DRIVER_CAPABILITIES=graphics,display,utility,compute \
+		$(IMAGE) \
+		bash -lc '\
+			set -e; \
+			echo "=== Isaac Lab WebRTC livestream (headless) ==="; \
+			echo "Connect the Isaac Sim WebRTC Streaming Client to this host."; \
+			echo "== GPU check =="; nvidia-smi || true; \
 			$(select_vulkan_icd); \
 			$(require_runtime_libs); \
 			cd /workspace/aicapstone; \
