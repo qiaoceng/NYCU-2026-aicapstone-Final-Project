@@ -7,8 +7,12 @@ Episode count is driven by --object_poses: each ``status == "full"`` entry in th
 file yields one replayed episode. Object placements are written via
 ``RigidObject.write_root_pose_to_sim`` after each ``env.reset()``.
 
+Variant of ``generate_aug.py``: every replayed episode is augmented (object
+position noise + action noise). There is NO guaranteed clean replay of the
+original trajectory — all generated data is varied from the very first episode.
+
 Usage:
-python scripts/datagen/generate_aug.py \
+python scripts/datagen/generate_aug_no_original.py \
     --task HCIS-CupStacking-SingleArm-v0 \
     --num_envs 1 \
     --device cuda \
@@ -56,7 +60,7 @@ parser.add_argument("--lerobot_dataset_repo_id", type=str, default=None, help="L
 parser.add_argument("--lerobot_dataset_fps", type=int, default=30, help="Lerobot Dataset frames per second.")
 
 # --- Data Augmentation Arguments ---
-parser.add_argument("--aug_multiplier", type=int, default=1, help="Number of times to replay each episode. 1 = original only. N = 1 original + (N-1) augmented.")
+parser.add_argument("--aug_multiplier", type=int, default=1, help="Number of augmented variants to generate per original episode. Every variant is noised (no clean replay).")
 parser.add_argument("--aug_pos_noise", type=float, default=0.0, help="Random noise scale (meters) applied to object's initial X/Y position. E.g., 0.05 for 5cm.")
 parser.add_argument("--aug_action_noise", type=float, default=0.0, help="Random Gaussian noise scale applied to the agent's action at every step.")
 # -----------------------------------
@@ -292,11 +296,10 @@ def _on_episode_done(
     env.reset()
     sm.reset()
     auto_terminate(env, False)
-    
-    apply_noise = (next_episode_idx % args_cli.aug_multiplier) != 0
-    pos_noise = args_cli.aug_pos_noise if apply_noise else 0.0
-    _apply_episode_poses(env, episodes[next_episode_idx], pos_noise)
-    
+
+    # Every episode is augmented (no clean original replay).
+    _apply_episode_poses(env, episodes[next_episode_idx], args_cli.aug_pos_noise)
+
     next_episode_idx += 1
 
     return next_episode_idx, current_recorded_demo_count, start_record_state, False, success
@@ -381,10 +384,9 @@ def main():
         simulation_app.close()
         return
         
-    apply_noise = (next_episode_idx % args_cli.aug_multiplier) != 0
-    pos_noise = args_cli.aug_pos_noise if apply_noise else 0.0
-    _apply_episode_poses(env, episodes[next_episode_idx], pos_noise)
-    
+    # Every episode is augmented (no clean original replay).
+    _apply_episode_poses(env, episodes[next_episode_idx], args_cli.aug_pos_noise)
+
     next_episode_idx += 1
 
     start_record_state = False
@@ -438,11 +440,11 @@ def main():
 
                     sm.pre_step(env)
                     actions = sm.get_action(env)
-                    
-                    apply_noise = ((next_episode_idx - 1) % args_cli.aug_multiplier) != 0
-                    if apply_noise and args_cli.aug_action_noise > 0.0:
+
+                    if args_cli.aug_action_noise > 0.0:
                         # Inject random Gaussian noise into actions for robustness
-                        # (Ensure they remain on the same device)
+                        # (Ensure they remain on the same device). Applied to every
+                        # episode — no clean original replay.
                         action_noise = torch.randn_like(actions) * args_cli.aug_action_noise
                         actions = actions + action_noise
                         
