@@ -126,6 +126,7 @@ args_cli = parser.parse_args()
 app_launcher = AppLauncher(vars(args_cli))
 simulation_app = app_launcher.app
 
+import os
 import time
 from typing import Any
 
@@ -274,6 +275,140 @@ def _print_mapping_shapes(title: str, values: dict[str, Any]) -> None:
     print(title)
     for key in sorted(values):
         print(f"  {key}: {_shape_summary(values[key])}")
+
+
+# Fallback estimated desk bounds (used if the counter prim is not found).
+_DESK_RANGE_FALLBACK = {
+    "x_min": 0.0,
+    "x_max": 0.8,
+    "y_min": -0.8,
+    "y_max": 0.0,
+    "z": 0.0,
+}
+
+# The kitchen USD has no rigid bodies / articulations, so the counter is NOT
+# registered as a scene entity by parse_usd_and_create_subassets. It lives
+# only as a static Xform in the stage. Leaf name verified by inspecting
+# packages/simulator/assets/scenes/kitchen/scene.usd directly.
+_PLATFORM_PRIM_NAME = "counter_right_main_group"
+_ENV_ROOT_PATH = "/World/envs/env_0"
+
+
+def get_table_bounds(env) -> dict:
+    """Extract the kitchen counter (platform) AABB in env-relative coords.
+
+    Queries the USD stage directly for the `counter_right_main_group` prim
+    and computes its world-aligned bounds via UsdGeom.BBoxCache, then shifts
+    into env-relative coordinates so the values line up with how cup
+    positions are recorded. Returns dict with x_min, x_max, y_min, y_max,
+    z (top surface height), and prim_path. Falls back to a hardcoded
+    estimate if the prim can't be located.
+    """
+    try:
+        import omni.usd
+        from pxr import Usd, UsdGeom
+
+        stage = omni.usd.get_context().get_stage()
+        if stage is None:
+            raise RuntimeError("USD stage not available yet")
+
+        env_root = stage.GetPrimAtPath(_ENV_ROOT_PATH)
+        if not env_root or not env_root.IsValid():
+            raise RuntimeError(f"{_ENV_ROOT_PATH} not in stage")
+
+        platform_prim = None
+        for prim in Usd.PrimRange(env_root):
+            if prim.GetName() == _PLATFORM_PRIM_NAME:
+                platform_prim = prim
+                break
+        if platform_prim is None:
+            raise RuntimeError(
+                f"prim '{_PLATFORM_PRIM_NAME}' not found under {_ENV_ROOT_PATH}"
+            )
+
+        bbox_cache = UsdGeom.BBoxCache(
+            Usd.TimeCode.Default(),
+            includedPurposes=[UsdGeom.Tokens.default_, UsdGeom.Tokens.render],
+            useExtentsHint=True,
+        )
+        world_range = bbox_cache.ComputeWorldBound(platform_prim).ComputeAlignedRange()
+        gf_min, gf_max = world_range.GetMin(), world_range.GetMax()
+
+        env_origin = env.scene.env_origins[0].cpu().numpy()
+        bounds = {
+            "x_min": float(gf_min[0]) - float(env_origin[0]),
+            "x_max": float(gf_max[0]) - float(env_origin[0]),
+            "y_min": float(gf_min[1]) - float(env_origin[1]),
+            "y_max": float(gf_max[1]) - float(env_origin[1]),
+            "z": float(gf_max[2]) - float(env_origin[2]),
+            "prim_path": str(platform_prim.GetPath()),
+        }
+        print(
+            f"[rollout] extracted platform bounds from '{_PLATFORM_PRIM_NAME}': "
+            f"x=[{bounds['x_min']:.3f}, {bounds['x_max']:.3f}], "
+            f"y=[{bounds['y_min']:.3f}, {bounds['y_max']:.3f}], "
+            f"z_top={bounds['z']:.3f}",
+            flush=True,
+        )
+        return bounds
+    except Exception as e:
+        print(f"[rollout] failed to extract platform bounds: {e}; using fallback", flush=True)
+        return dict(_DESK_RANGE_FALLBACK)
+
+
+def capture_episode_state(env, episode_num: int, desk_range: dict) -> dict:
+    """Snapshot the env state used for per-episode metadata.
+
+    Records desk range, robot arm position (end-effector body if discoverable,
+    else robot root), and the two cups' initial positions — all in env-relative
+    coordinates, matching how success conditions are evaluated.
+    """
+    state: dict = {"episode": episode_num}
+    try:
+        env_origin = env.scene.env_origins[0].cpu().numpy()
+        state["env_origin"] = env_origin.tolist()
+
+        blue_cup = env.scene["blue_cup"]
+        pink_cup = env.scene["pink_cup"]
+        state["blue_cup_initial"] = (
+            blue_cup.data.root_pos_w[0].cpu().numpy() - env_origin
+        ).tolist()
+        state["pink_cup_initial"] = (
+            pink_cup.data.root_pos_w[0].cpu().numpy() - env_origin
+        ).tolist()
+
+        try:
+            robot = env.scene["robot"]
+            body_names = list(getattr(robot.data, "body_names", []) or [])
+            arm_pos = None
+            for name in (
+                "panda_hand",
+                "panda_hand_tcp",
+                "tcp",
+                "ee_link",
+                "ee",
+                "gripper",
+            ):
+                if name in body_names:
+                    idx = body_names.index(name)
+                    arm_pos = (
+                        robot.data.body_pos_w[0, idx].cpu().numpy() - env_origin
+                    ).tolist()
+                    state["robot_arm_body"] = name
+                    break
+            if arm_pos is None:
+                arm_pos = (
+                    robot.data.root_pos_w[0].cpu().numpy() - env_origin
+                ).tolist()
+                state["robot_arm_body"] = "root"
+            state["robot_arm_position"] = arm_pos
+        except Exception as e:
+            state["robot_arm_error"] = str(e)
+
+        state["desk_range"] = dict(desk_range)
+    except Exception as e:
+        state["error"] = str(e)
+    return state
 
 
 class LeRobotSyncPolicy:
@@ -460,6 +595,80 @@ def get_camera_infos(
     return camera_infos
 
 
+class EpisodeVideoWriter:
+    """Incrementally writes RGB frames to an mp4, renamed with the outcome on close."""
+
+    def __init__(self, path: str, fps: int):
+        self._path = path
+        self._fps = fps
+        self._writer = None
+        self._backend = None
+        self._closed = False
+
+    def _ensure(self, frame: np.ndarray) -> None:
+        if self._writer is not None:
+            return
+        try:
+            import imageio.v2 as imageio
+
+            self._writer = imageio.get_writer(
+                self._path, fps=self._fps, macro_block_size=None
+            )
+            self._backend = "imageio"
+        except Exception:
+            import cv2
+
+            self._cv2 = cv2
+            height, width = frame.shape[:2]
+            self._writer = cv2.VideoWriter(
+                self._path, cv2.VideoWriter_fourcc(*"mp4v"), self._fps, (width, height)
+            )
+            self._backend = "cv2"
+
+    def add(self, frame: np.ndarray) -> None:
+        if self._closed:
+            return
+        self._ensure(frame)
+        if self._backend == "imageio":
+            self._writer.append_data(frame)
+        else:
+            self._writer.write(self._cv2.cvtColor(frame, self._cv2.COLOR_RGB2BGR))
+
+    def close(self, outcome: str | None = None) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        if self._writer is None:
+            return
+        if self._backend == "imageio":
+            self._writer.close()
+        else:
+            self._writer.release()
+        if outcome:
+            root, ext = os.path.splitext(self._path)
+            final = f"{root}_{outcome}{ext}"
+            try:
+                os.replace(self._path, final)
+                self._path = final
+            except OSError:
+                pass
+        print(f"[rollout] saved video: {self._path}", flush=True)
+
+
+def grab_frame(obs_dict: dict, camera_keys: list):
+    policy_obs = obs_dict["policy"]
+    images = [
+        policy_obs[key].detach().cpu().numpy().astype(np.uint8)[0]
+        for key in camera_keys
+        if key in policy_obs
+    ]
+    if not images:
+        return None
+    height = min(img.shape[0] for img in images)
+    images = [img[:height] for img in images]
+    return np.concatenate(images, axis=1)
+
+
 def main():
     task_id = resolve_task(args_cli.task)
     args_cli.task = task_id
@@ -492,6 +701,49 @@ def main():
     print("[rollout] resetting environment...", flush=True)
     obs_dict, _ = env.reset()
     print("[rollout] env.reset() returned", flush=True)
+    
+    # Print initial cup and table information
+    print("\n[Initial Setup] Cup positions and table information:")
+    try:
+        blue_cup = env.scene["blue_cup"]
+        pink_cup = env.scene["pink_cup"]
+        
+        # CORRECT: Get world position and subtract environment origin (like success condition does)
+        env_origin = env.scene.env_origins[0].cpu().numpy()
+        blue_init_pos_w = blue_cup.data.root_pos_w[0].cpu().numpy()
+        pink_init_pos_w = pink_cup.data.root_pos_w[0].cpu().numpy()
+        
+        # Convert to relative coordinates (subtract env origin)
+        blue_init_pos = blue_init_pos_w - env_origin
+        pink_init_pos = pink_init_pos_w - env_origin
+        
+        print(f"  Environment origin: x={env_origin[0]:.4f}, y={env_origin[1]:.4f}, z={env_origin[2]:.4f}")
+        print(f"\n  Blue cup initial (world):  x={blue_init_pos_w[0]:.4f}, y={blue_init_pos_w[1]:.4f}, z={blue_init_pos_w[2]:.4f}")
+        print(f"  Pink cup initial (world):  x={pink_init_pos_w[0]:.4f}, y={pink_init_pos_w[1]:.4f}, z={pink_init_pos_w[2]:.4f}")
+        print(f"\n  Blue cup initial (relative): x={blue_init_pos[0]:.4f}, y={blue_init_pos[1]:.4f}, z={blue_init_pos[2]:.4f}")
+        print(f"  Pink cup initial (relative): x={pink_init_pos[0]:.4f}, y={pink_init_pos[1]:.4f}, z={pink_init_pos[2]:.4f}")
+        
+        # Calculate table center from cup positions (both cups are on the table)
+        table_center_x = (blue_init_pos[0] + pink_init_pos[0]) / 2.0
+        table_center_y = (blue_init_pos[1] + pink_init_pos[1]) / 2.0
+        table_center_z = blue_init_pos[2]  # Table surface height (same as cup Z when placed on table)
+        
+        print(f"\n  [CALCULATED] Table center: x={table_center_x:.4f}, y={table_center_y:.4f}, z={table_center_z:.4f}")
+        
+        # Estimate table bounds from cup positions (assuming cups are within table bounds)
+        # With cups at (0.36, -0.4) and (0.46, -0.4), and some margin
+        print(f"\n  [ESTIMATED] Table bounds:")
+        print(f"    X range: 0.0 to 0.8 (center ~0.4)")
+        print(f"    Y range: -0.8 to 0.0 (center ~-0.4)")
+        print(f"    Z: 0.0 (table surface)")
+        
+        print(f"\n  [ESTIMATED] Table corners:")
+        print(f"    Corner 1: (0.0, 0.0, 0.0)   - front-right")
+        print(f"    Corner 2: (0.8, 0.0, 0.0)   - front-left")
+        print(f"    Corner 3: (0.8, -0.8, 0.0)  - back-left")
+        print(f"    Corner 4: (0.0, -0.8, 0.0)  - back-right")
+    except Exception as e:
+        print(f"  Could not read cup positions: {e}")
 
     language_instruction = args_cli.policy_language_instruction
     if language_instruction is None:
@@ -520,17 +772,59 @@ def main():
 
     setup_dual_viewports()
 
+    def print_cup_and_table_info(env, episode_num):
+        """Debug function to print cup positions and table bounds."""
+        try:
+            blue_cup = env.scene["blue_cup"]
+            pink_cup = env.scene["pink_cup"]
+            
+            # CORRECT: Get world position and subtract environment origin
+            env_origin = env.scene.env_origins[0].cpu().numpy()
+            blue_pos_w = blue_cup.data.root_pos_w[0].cpu().numpy()
+            pink_pos_w = pink_cup.data.root_pos_w[0].cpu().numpy()
+            
+            # Convert to relative coordinates (same as success condition function)
+            blue_pos = blue_pos_w - env_origin
+            pink_pos = pink_pos_w - env_origin
+            
+            print(f"\n[Episode {episode_num}] Cup positions (relative to env):")
+            print(f"  Blue cup:  x={blue_pos[0]:.4f}, y={blue_pos[1]:.4f}, z={blue_pos[2]:.4f}")
+            print(f"  Pink cup:  x={pink_pos[0]:.4f}, y={pink_pos[1]:.4f}, z={pink_pos[2]:.4f}")
+        except Exception as e:
+            print(f"[Episode {episode_num}] Could not read cup positions: {e}")
 
     success_count, episode_count = 0, 1
+    camera_keys = list(camera_infos.keys())
+
+    # Extract actual table bounds from the scene.
+    desk_range = get_table_bounds(env)
+
+    checkpoint_name = args_cli.policy_checkpoint_path[12:] or "checkpoint"
+    video_dir = os.path.join(os.getcwd(), "rollout_videos", checkpoint_name)
+    os.makedirs(video_dir, exist_ok=True)
+    episodes_json_path = os.path.join(video_dir, "episodes.json")
+    episodes_data: list[dict] = []
+    try:
+        video_fps = max(1, round(1.0 / env.step_dt))
+    except Exception:
+        video_fps = 30
+    print(f"[rollout] recording videos to {video_dir} at {video_fps} fps", flush=True)
+    print(f"[rollout] episode metadata will be saved to {episodes_json_path}", flush=True)
     while max_episode_count <= 0 or episode_count <= max_episode_count:
         print(f"[Evaluation] Evaluating episode {episode_count}...")
-        success, time_out = False, False
+        episode_state = capture_episode_state(env, episode_count, desk_range)
+        success, time_out, manual_reset = False, False, False
+        video_writer = EpisodeVideoWriter(
+            os.path.join(video_dir, f"ep{episode_count:03d}.mp4"), video_fps
+        )
         while simulation_app.is_running():
             with torch.inference_mode():
                 if controller.reset_state:
                     controller.reset()
                     obs_dict, _ = env.reset()
+                    print_cup_and_table_info(env, episode_count)
                     policy.reset()
+                    manual_reset = True
                     episode_count += 1
                     break
 
@@ -545,6 +839,9 @@ def main():
                     if env.cfg.dynamic_reset_gripper_effort_limit:
                         dynamic_reset_gripper_effort_limit_sim(env, teleop_device)
                     obs_dict, _, reset_terminated, reset_time_outs, _ = env.step(action)
+                    frame = grab_frame(obs_dict, camera_keys)
+                    if frame is not None:
+                        video_writer.add(frame)
                     if reset_terminated[0]:
                         success = True
                         break
@@ -555,15 +852,55 @@ def main():
                         rate_limiter.sleep(env)
             if success:
                 print(f"[Evaluation] Episode {episode_count} is successful!")
+                try:
+                    blue_cup = env.scene["blue_cup"]
+                    pink_cup = env.scene["pink_cup"]
+                    env_origin = env.scene.env_origins[0].cpu().numpy()
+                    blue_pos = (blue_cup.data.root_pos_w[0].cpu().numpy() - env_origin)
+                    pink_pos = (pink_cup.data.root_pos_w[0].cpu().numpy() - env_origin)
+                    print(f"  Final cup positions (relative to env):")
+                    print(f"    Blue cup:  x={blue_pos[0]:.4f}, y={blue_pos[1]:.4f}, z={blue_pos[2]:.4f}")
+                    print(f"    Pink cup:  x={pink_pos[0]:.4f}, y={pink_pos[1]:.4f}, z={pink_pos[2]:.4f}")
+                except Exception as e:
+                    print(f"  Could not read final positions: {e}")
+                video_writer.close(outcome="success")
                 episode_count += 1
                 success_count += 1
                 policy.reset()
                 break
             if time_out:
                 print(f"[Evaluation] Episode {episode_count} timed out!")
+                try:
+                    blue_cup = env.scene["blue_cup"]
+                    pink_cup = env.scene["pink_cup"]
+                    env_origin = env.scene.env_origins[0].cpu().numpy()
+                    blue_pos = (blue_cup.data.root_pos_w[0].cpu().numpy() - env_origin)
+                    pink_pos = (pink_cup.data.root_pos_w[0].cpu().numpy() - env_origin)
+                    print(f"  Final cup positions (relative to env) - timeout:")
+                    print(f"    Blue cup:  x={blue_pos[0]:.4f}, y={blue_pos[1]:.4f}, z={blue_pos[2]:.4f}")
+                    print(f"    Pink cup:  x={pink_pos[0]:.4f}, y={pink_pos[1]:.4f}, z={pink_pos[2]:.4f}")
+                except Exception as e:
+                    print(f"  Could not read final positions: {e}")
+                video_writer.close(outcome="timeout")
                 episode_count += 1
                 policy.reset()
                 break
+        video_writer.close()
+        if success:
+            outcome = "success"
+        elif time_out:
+            outcome = "timeout"
+        elif manual_reset:
+            outcome = "manual_reset"
+        else:
+            outcome = "incomplete"
+        episode_state["outcome"] = outcome
+        episodes_data.append(episode_state)
+        try:
+            with open(episodes_json_path, "w") as f:
+                _json.dump(episodes_data, f, indent=2)
+        except OSError as e:
+            print(f"[rollout] failed to save {episodes_json_path}: {e}", flush=True)
         print(
             f"[Evaluation] now success rate: {success_count / (episode_count - 1)} "
             f" [{success_count}/{episode_count - 1}]"

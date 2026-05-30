@@ -277,6 +277,143 @@ def _print_mapping_shapes(title: str, values: dict[str, Any]) -> None:
         print(f"  {key}: {_shape_summary(values[key])}")
 
 
+# Fallback estimated desk bounds (used if table asset is not found).
+_DESK_RANGE_FALLBACK = {
+    "x_min": 0.0,
+    "x_max": 0.8,
+    "y_min": -0.8,
+    "y_max": 0.0,
+    "z": 0.0,
+}
+
+
+def get_table_bounds(env) -> dict:
+    """Extract table/board bounds from scene, or return fallback estimate.
+
+    Tries to find a table or board asset in the scene and extract its world-space
+    bounds. Searches for common names: table, board, counter, desktop, surface,
+    platform, sink_counter, cooking_counter, etc.
+    Returns dict with x_min, x_max, y_min, y_max, z (height).
+    Falls back to hardcoded estimate if asset not found.
+    """
+    try:
+        # Try a list of common board/counter names
+        board_names = [
+            "table",
+            "board",
+            "counter",
+            "desktop",
+            "surface",
+            "platform",
+            "sink_counter",
+            "cooking_counter",
+            "work_surface",
+            "table_top",
+        ]
+
+        board = None
+        found_name = None
+        for name in board_names:
+            if name in env.scene.keys():
+                board = env.scene[name]
+                found_name = name
+                break
+
+        if board is None:
+            # Try fuzzy search
+            for key in env.scene.keys():
+                if any(word in key.lower() for word in ("table", "board", "counter", "surface")):
+                    board = env.scene[key]
+                    found_name = key
+                    break
+
+        if board is None:
+            raise ValueError("No table/board asset found")
+
+        root_pos = board.data.root_pos_w[0].cpu().numpy()
+        aabb_center = board.data.aabb_center
+        aabb_extent = board.data.aabb_extent
+        if aabb_center is not None and aabb_extent is not None:
+            center = aabb_center[0].cpu().numpy() if hasattr(aabb_center, "cpu") else aabb_center[0]
+            extent = aabb_extent[0].cpu().numpy() if hasattr(aabb_extent, "cpu") else aabb_extent[0]
+        else:
+            raise ValueError("AABB not available on board")
+
+        half_extent = extent / 2.0
+        bounds = {
+            "x_min": float(center[0] - half_extent[0]),
+            "x_max": float(center[0] + half_extent[0]),
+            "y_min": float(center[1] - half_extent[1]),
+            "y_max": float(center[1] + half_extent[1]),
+            "z": float(root_pos[2]),
+        }
+        print(
+            f"[rollout] extracted board bounds from '{found_name}': "
+            f"x=[{bounds['x_min']:.2f}, {bounds['x_max']:.2f}], "
+            f"y=[{bounds['y_min']:.2f}, {bounds['y_max']:.2f}]",
+            flush=True,
+        )
+        return bounds
+    except Exception as e:
+        print(f"[rollout] failed to extract board bounds: {e}; using fallback", flush=True)
+        return dict(_DESK_RANGE_FALLBACK)
+
+
+def capture_episode_state(env, episode_num: int, desk_range: dict) -> dict:
+    """Snapshot the env state used for per-episode metadata.
+
+    Records desk range, robot arm position (end-effector body if discoverable,
+    else robot root), and the two cups' initial positions — all in env-relative
+    coordinates, matching how success conditions are evaluated.
+    """
+    state: dict = {"episode": episode_num}
+    try:
+        env_origin = env.scene.env_origins[0].cpu().numpy()
+        state["env_origin"] = env_origin.tolist()
+
+        blue_cup = env.scene["blue_cup"]
+        pink_cup = env.scene["pink_cup"]
+        state["blue_cup_initial"] = (
+            blue_cup.data.root_pos_w[0].cpu().numpy() - env_origin
+        ).tolist()
+        state["pink_cup_initial"] = (
+            pink_cup.data.root_pos_w[0].cpu().numpy() - env_origin
+        ).tolist()
+
+        try:
+            robot = env.scene["robot"]
+            body_names = list(getattr(robot.data, "body_names", []) or [])
+            arm_pos = None
+            for name in (
+                "panda_hand",
+                "panda_hand_tcp",
+                "tcp",
+                "ee_link",
+                "ee",
+                "gripper",
+            ):
+                if name in body_names:
+                    idx = body_names.index(name)
+                    arm_pos = (
+                        robot.data.body_pos_w[0, idx].cpu().numpy() - env_origin
+                    ).tolist()
+                    state["robot_arm_body"] = name
+                    break
+            if arm_pos is None:
+                arm_pos = (
+                    robot.data.root_pos_w[0].cpu().numpy() - env_origin
+                ).tolist()
+                state["robot_arm_body"] = "root"
+            state["robot_arm_position"] = arm_pos
+        except Exception as e:
+            state["robot_arm_error"] = str(e)
+
+        state["desk_range"] = dict(desk_range)
+    except Exception as e:
+        state["error"] = str(e)
+    return state
+
+
 class LeRobotSyncPolicy:
     """Local LeRobot inference path matching the async server pipeline."""
 
@@ -661,16 +798,27 @@ def main():
 
     success_count, episode_count = 0, 1
     camera_keys = list(camera_infos.keys())
-    video_dir = os.path.join(os.getcwd(), "rollout_videos")
+
+    # Extract actual table bounds from the scene.
+    desk_range = get_table_bounds(env)
+
+    checkpoint_name = os.path.basename(
+        os.path.normpath(args_cli.policy_checkpoint_path)
+    ) or "checkpoint"
+    video_dir = os.path.join(os.getcwd(), "rollout_videos", checkpoint_name)
     os.makedirs(video_dir, exist_ok=True)
+    episodes_json_path = os.path.join(video_dir, "episodes.json")
+    episodes_data: list[dict] = []
     try:
         video_fps = max(1, round(1.0 / env.step_dt))
     except Exception:
         video_fps = 30
     print(f"[rollout] recording videos to {video_dir} at {video_fps} fps", flush=True)
+    print(f"[rollout] episode metadata will be saved to {episodes_json_path}", flush=True)
     while max_episode_count <= 0 or episode_count <= max_episode_count:
         print(f"[Evaluation] Evaluating episode {episode_count}...")
-        success, time_out = False, False
+        episode_state = capture_episode_state(env, episode_count, desk_range)
+        success, time_out, manual_reset = False, False, False
         video_writer = EpisodeVideoWriter(
             os.path.join(video_dir, f"ep{episode_count:03d}.mp4"), video_fps
         )
@@ -681,6 +829,7 @@ def main():
                     obs_dict, _ = env.reset()
                     print_cup_and_table_info(env, episode_count)
                     policy.reset()
+                    manual_reset = True
                     episode_count += 1
                     break
 
@@ -742,6 +891,21 @@ def main():
                 policy.reset()
                 break
         video_writer.close()
+        if success:
+            outcome = "success"
+        elif time_out:
+            outcome = "timeout"
+        elif manual_reset:
+            outcome = "manual_reset"
+        else:
+            outcome = "incomplete"
+        episode_state["outcome"] = outcome
+        episodes_data.append(episode_state)
+        try:
+            with open(episodes_json_path, "w") as f:
+                _json.dump(episodes_data, f, indent=2)
+        except OSError as e:
+            print(f"[rollout] failed to save {episodes_json_path}: {e}", flush=True)
         print(
             f"[Evaluation] now success rate: {success_count / (episode_count - 1)} "
             f" [{success_count}/{episode_count - 1}]"
