@@ -34,7 +34,7 @@ hf auth login --token <YOUR_HF_TOKEN>
 export HF_USER=<your-huggingface-username>
 ```
 
-## UMI Pipeline
+## Step 1: UMI Pipeline
 Run on local machine (no GPU needed).
 1. Build `uv` environment. This step is for UMI pipeline only.
    ```bash
@@ -72,7 +72,7 @@ Run on local machine (no GPU needed).
 #### Our data: [YinXuanLi/aicapstone_course_project](https://huggingface.co/YinXuanLi/aicapstone_course_project)
 
 
-## Generate Synthetic Data in Simulation
+## Step 2: Generate Synthetic Data in Simulation
 Run on: GPU machine, inside Docker container.
 
 1. Build a docker
@@ -121,7 +121,58 @@ Run on: GPU machine, inside Docker container.
         --annotate
     ```
 
-## Train a Policy
+## Step 3: Train a Policy
 Run on GPU machine and host (not inside Docker).
 
-1. 
+1. Train a policy
+    ```bash
+    CUDA_VISIBLE_DEVICES=0 lerobot-train \
+        --dataset.repo_id=qiaoceng/AIC-data_augment-v2 \
+        --dataset.image_transforms.enable=true \
+        --policy.type=act \
+        --output_dir=outputs/train/act-v3 \
+        --job_name=cupstacking \
+        --policy.device=cuda \
+        --wandb.enable=true \
+        --policy.repo_id=qiaoceng/AIC-act-v3-100000 \
+        --policy.chunk_size=50 \
+        --policy.n_action_steps=50 \
+        --batch_size=32 \
+        --steps=100000 \
+        --save_freq=20000
+    ```
+
+2. (Optional) Upload the specific checkpoint to Hugging Face
+    ```bash
+    hf upload qiaoceng/AIC-act-v3-080000 outputs/train/act-v3/checkpoints/080000/pretrained_model --repo-type model
+    ```
+
+## Step 4: Evaluate in Simulation (Rollout)
+Run on: GPU machine, inside Docker container.
+
+1. Download policy
+    ```bash
+    hf download qiaoceng/AIC-act-v3-080000 --local-dir checkpoints/act-v3-080000
+    ```
+
+2. Evaluate in simulator 
+    ```bash
+    python scripts/rollout_record_platform.py \
+        --task=eval/cup_stacking_eval.py \
+        --policy_type=lerobot-act \
+        --policy_checkpoint_path=checkpoints/act-v3-080000 \
+        --policy_action_horizon=1 \
+        --device=cuda \
+        --enable_cameras \
+        --headless \
+        --eval_rounds=50 \
+        --episode_length_s=20 \
+    ```
+    Note: `rollout_record_platform.py` can save the simulation videos and create a .json file to record the initial positions of the blue cups and the pink cups.
+
+3. (Optional) Build the distribution map of the cups' initial positions
+    ```bash
+    python scripts/rollout_record_scatter.py \
+        --json [Path to the json file] \
+        --annotate
+    ```
