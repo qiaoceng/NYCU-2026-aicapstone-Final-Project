@@ -1,4 +1,6 @@
-#  Complete Execution Guidelines
+#  Complete Execution Guidelines For AIC Final Project
+Group 3
+Members: 李尹瑄、曾歆喬、莊蕓安、謝欣陵、徐畹茜、黃襄香
 
 ## Prerequisites
 
