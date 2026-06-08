@@ -30,8 +30,11 @@ ffmpeg -version
 
 ### Hugging Face login
 ``` bash
-hf auth login --token <YOUR_HF_TOKEN>
+hf auth login --token <HF_TOKEN>
 export HF_USER=<your-huggingface-username>
+
+# Vevify the authentication
+hf auth whoami
 ```
 
 ## Step 1: UMI Pipeline
@@ -84,7 +87,7 @@ Run on: GPU machine, inside Docker container.
     make launch-isaaclab-glowsai-4090
     ```
     
-2. Build synthetic dataset
+2. Build synthetic dataset (Related file: `scripts/datagen/generate_aug_scatter.py`)
     ```bash
     python scripts/datagen/generate_aug_scatter.py \
         --task HCIS-CupStacking-SingleArm-v0 \
@@ -114,12 +117,13 @@ Run on: GPU machine, inside Docker container.
     "
     ```
 
-5. (Optional) Build the distribution map of the cups' initial positions for every episodes
+5. (Optional) Build the distribution map of the cups' initial positions for every episodes (Related file: scripts/rollout_record_scatter.py)
     ```bash
     python scripts/rollout_record_scatter.py \
         --json ~/.cache/huggingface/lerobot/${HF_USER}/<repo_id>/scatter_episodes_success.json \
         --annotate
     ```
+#### Our dataset: [qiaoceng/AIC-data_augment-v2](https://huggingface.co/datasets/qiaoceng/AIC-data_augment-v2)
 
 ## Step 3: Train a Policy
 Run on GPU machine and host (not inside Docker).
@@ -146,6 +150,7 @@ Run on GPU machine and host (not inside Docker).
     ```bash
     hf upload qiaoceng/AIC-act-v3-080000 outputs/train/act-v3/checkpoints/080000/pretrained_model --repo-type model
     ```
+#### Our policy: [qiaoceng/AIC-act-v3-080000](https://huggingface.co/qiaoceng/AIC-act-v3-080000)
 
 ## Step 4: Evaluate in Simulation (Rollout)
 Run on: GPU machine, inside Docker container.
@@ -155,7 +160,7 @@ Run on: GPU machine, inside Docker container.
     hf download qiaoceng/AIC-act-v3-080000 --local-dir checkpoints/act-v3-080000
     ```
 
-2. Evaluate in simulator 
+2. Evaluate in simulator (Related file: scripts/rollout_record_platform.py)
     ```bash
     python scripts/rollout_record_platform.py \
         --task=eval/cup_stacking_eval.py \
@@ -170,7 +175,7 @@ Run on: GPU machine, inside Docker container.
     ```
     Note: `rollout_record_platform.py` can save the simulation videos and create a .json file to record the initial positions of the blue cups and the pink cups.
 
-3. (Optional) Build the distribution map of the cups' initial positions
+3. (Optional) Build the distribution map of the cups' initial positions (Related file: scripts/rollout_record_scatter.py)
     ```bash
     python scripts/rollout_record_scatter.py \
         --json [Path to the json file] \
